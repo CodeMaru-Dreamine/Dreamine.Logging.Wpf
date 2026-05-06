@@ -23,12 +23,12 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<ProjectReference Include="..\Dreamine.Logging\Dreamine.Logging.csproj" />
+		<None Include="README.md" Pack="true" PackagePath="\" />
+		<None Include="icon.png" />
 	</ItemGroup>
 
 	<ItemGroup>
-		<None Include="README.md" Pack="true" PackagePath="\" />
-		<None Include="icon.png" Pack="true" PackagePath="\" />
+	  <ProjectReference Include="..\Logging\Dreamine.Logging.csproj" />
 	</ItemGroup>
 
 </Project>
