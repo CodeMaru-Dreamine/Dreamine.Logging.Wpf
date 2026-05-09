@@ -1,31 +1,66 @@
-﻿# Dreamine.Logging.Wpf
+# Dreamine.Logging.Wpf
 
 Dreamine.Logging.Wpf provides WPF-specific logging UI components for Dreamine applications.
-It integrates `Dreamine.Logging` with WPF through a log panel view, log panel view model, and UI dispatcher support.
+It connects `Dreamine.Logging` to WPF through a log panel view, a bounded log panel view model, and UI dispatcher helpers designed for high-frequency log updates.
 
 [➡️ 한국어 문서 보기](./README_KO.md)
 
 ## Purpose
 
 This package is responsible only for WPF presentation and UI-thread integration.
-The core logging pipeline is provided by `Dreamine.Logging`.
+The core logging pipeline, sinks, formatters, and async queue are provided by `Dreamine.Logging`.
+
+`Dreamine.Logging.Wpf` depends on `Dreamine.Logging`.
+`Dreamine.Logging` must not depend on WPF.
 
 ## Features
 
 - `DreamineLogPanelView` for displaying logs in WPF
 - `DreamineLogPanelViewModel` for binding log entries to the UI
-- `WpfLogUiDispatcher` for safe UI thread updates
+- Bounded visible log collection with `DefaultDisplayCapacity = 1000`
+- Batched UI update delivery through `BatchedDispatcher<T>`
+- `WpfLogUiDispatcher` for WPF Dispatcher access
 - Real-time log display through `IDreamineLogStore.LogAdded`
+- Clear support through `DreamineLogPanelViewModel.Clear()`
+- Auto-select/auto-scroll support through `AutoScroll` and `EntryAppended`
 - Log detail display for selected entries
+- Event unsubscription through `Dispose()` to prevent ViewModel retention
 
-## Basic Architecture
+## Recommended Architecture
+
+The WPF package should observe the in-memory log store only.
+It should not write files, own the logger, or create the async queue.
 
 ```text
-Dreamine.Logging
-  -> InMemoryLogStore
-     -> DreamineLogPanelViewModel
-        -> DreamineLogPanelView
+[Dreamine.Logging]
+  Logger
+    └─► AsyncQueueSink
+          └─► CompositeLogSink
+                ├─► InMemoryLogStore ──(LogAdded event)──┐
+                └─► TextFileLogSink                      │
+                                                         ▼
+                                          [Dreamine.Logging.Wpf]
+                                          DreamineLogPanelViewModel
+                                            └─► DreamineLogPanelView
 ```
+
+`DreamineLogPanelViewModel` is *not* a child of the sink chain.
+It is a separate observer that subscribes to `InMemoryLogStore.LogAdded`,
+and forwards updates to the UI thread in batches via `BatchedDispatcher<T>`.
+
+## Why Batched UI Dispatch Exists
+
+A log panel can receive log events from many worker threads.
+If each log entry schedules a separate `Dispatcher.BeginInvoke`, the WPF Dispatcher queue can grow faster than the UI can process it.
+This creates memory pressure and makes the UI feel frozen.
+
+`BatchedDispatcher<T>` coalesces many incoming log entries into a limited UI-thread batch:
+
+- producers enqueue from any thread;
+- only one dispatcher operation is scheduled at a time;
+- each UI batch processes up to `MaxBatchSize` entries;
+- additional entries are processed in the next pass;
+- visible entries are trimmed to the configured display capacity.
 
 ## Example XAML Usage
 
@@ -56,6 +91,9 @@ public sealed class PageLogViewModel : ViewModelBase
 
 ## Example Registration
 
+The log store must be registered by the core logging registration.
+The WPF package only needs the UI dispatcher and log panel view model registration.
+
 ```csharp
 DMContainer.RegisterSingleton<WpfLogUiDispatcher>(
     new WpfLogUiDispatcher());
@@ -65,6 +103,91 @@ DMContainer.Register<DreamineLogPanelViewModel>(() =>
         DMContainer.Resolve<IDreamineLogStore>(),
         DMContainer.Resolve<WpfLogUiDispatcher>()));
 ```
+
+If a custom visible capacity is needed:
+
+```csharp
+DMContainer.Register<DreamineLogPanelViewModel>(() =>
+    new DreamineLogPanelViewModel(
+        DMContainer.Resolve<IDreamineLogStore>(),
+        DMContainer.Resolve<WpfLogUiDispatcher>(),
+        displayCapacity: 2000));
+```
+
+## Full Logging + WPF Registration Example
+
+```csharp
+private static AsyncQueueSink? _asyncLogSink;
+
+private static void RegisterLogging()
+{
+    var logStore = new InMemoryLogStore(capacity: 1000);
+    var formatter = new DreamineTextLogFormatter();
+
+    var textFileSink = new TextFileLogSink(
+        Path.Combine(AppContext.BaseDirectory, "Logs"),
+        formatter,
+        flushEveryWriteCount: 20);
+
+    var compositeSink = new CompositeLogSink(new IDreamineLogSink[]
+    {
+        logStore,
+        textFileSink
+    });
+
+    _asyncLogSink = new AsyncQueueSink(
+        compositeSink,
+        capacity: 8192,
+        drainBatchSize: 256);
+
+    // Note: DreamineLogger currently has no (single sink, level, category)
+    // overload, so even a single sink is wrapped as IEnumerable<IDreamineLogSink>.
+    var logger = new DreamineLogger(
+        new IDreamineLogSink[] { _asyncLogSink },
+        DreamineLogLevel.Trace,
+        category: "SampleSmart");
+
+    DMContainer.RegisterSingleton(logStore);
+    DMContainer.RegisterSingleton<IDreamineLogStore>(logStore);
+    DMContainer.RegisterSingleton<IDreamineLogFormatter>(formatter);
+    DMContainer.RegisterSingleton<IDreamineLogSink>(_asyncLogSink);
+    DMContainer.RegisterSingleton<IDreamineLogger>(logger);
+
+    DMContainer.RegisterSingleton<WpfLogUiDispatcher>(new WpfLogUiDispatcher());
+
+    DMContainer.Register<DreamineLogPanelViewModel>(() =>
+        new DreamineLogPanelViewModel(
+            DMContainer.Resolve<IDreamineLogStore>(),
+            DMContainer.Resolve<WpfLogUiDispatcher>()));
+}
+```
+
+## Shutdown
+
+When the logger uses `AsyncQueueSink`, drain pending logs on application shutdown.
+
+```csharp
+protected override void OnExit(ExitEventArgs e)
+{
+    try
+    {
+        _asyncLogSink?.ShutdownAsync(TimeSpan.FromSeconds(2))
+                      .GetAwaiter()
+                      .GetResult();
+    }
+    catch
+    {
+        // Shutdown errors must not prevent process exit.
+    }
+    finally
+    {
+        base.OnExit(e);
+    }
+}
+```
+
+`OnExit` is a synchronous method, so use `GetAwaiter().GetResult()` rather than
+`async void` to ensure the process does not exit before the queue is drained.
 
 ## Important Notes
 
@@ -81,25 +204,37 @@ The detail text binding should use `Mode=OneWay` because the detail text is read
 <TextBox Text="{Binding SelectedDetailText, Mode=OneWay}" />
 ```
 
-## Relationship with Dreamine.Logging
+Dispose `DreamineLogPanelViewModel` when the owning page or window is permanently destroyed.
+This unsubscribes from `IDreamineLogStore.LogAdded` and prevents the ViewModel from being retained by the event source.
 
-`Dreamine.Logging.Wpf` depends on `Dreamine.Logging`.
-`Dreamine.Logging` must not depend on WPF.
+## Performance Notes
+
+- The visible `Entries` collection is capped, so it does not grow forever.
+- UI updates are batched instead of scheduling one Dispatcher operation per log entry.
+- The log panel is suitable for diagnostics and monitoring, not for storing unlimited historical logs.
+- For long-term history, use `TextFileLogSink` or another persistent sink in `Dreamine.Logging`.
+- Avoid logging every cycle in production thread loops unless diagnostic mode is enabled.
+
+## Relationship with Dreamine.Logging
 
 ```text
 Dreamine.Logging.Wpf
   -> Dreamine.Logging
 ```
 
+The dependency direction must remain one-way.
+The WPF package is a presentation adapter over the core logging package.
+
 ## Future Roadmap
 
-- `DMContainer.UseDreamineLoggingWpf()`
-- `DMContainer.UseDreamineLoggingForWpf(...)`
-- Auto-scroll support
-- Clear button
+- `DMContainer.UseDreamineLoggingWpf()` (registers UI dispatcher and panel view model in one line)
+- `DMContainer.UseDreamineLoggingForWpf(...)` (a unified entry point that performs both core and WPF registration at once)
+- Built-in clear command binding
 - Log level filter
 - Search/filter UI
 - Export selected logs
+- Optional auto-scroll behavior helper
+- Optional status indicator for dropped async logs (UI exposing `AsyncQueueSink.DroppedCount`)
 
 ## License
 

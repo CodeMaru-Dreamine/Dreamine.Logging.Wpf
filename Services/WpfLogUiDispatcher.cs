@@ -1,70 +1,72 @@
-﻿using System;
+using System;
 using System.Windows;
 using System.Windows.Threading;
 
-namespace Dreamine.Logging.Wpf.Services;
-
-/// <summary>
-/// Provides UI thread dispatching for WPF log views.
-/// </summary>
-public sealed class WpfLogUiDispatcher
+namespace Dreamine.Logging.Wpf.Services
 {
-    private readonly Dispatcher _dispatcher;
-
     /// <summary>
-    /// Initializes a new instance of the <see cref="WpfLogUiDispatcher"/> class.
+    /// Provides UI thread dispatching for WPF log views.
     /// </summary>
-    public WpfLogUiDispatcher()
-        : this(Application.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher)
+    public sealed class WpfLogUiDispatcher
     {
-    }
+        private readonly Dispatcher _dispatcher;
 
-    /// <summary>
-    /// Initializes a new instance of the <see cref="WpfLogUiDispatcher"/> class.
-    /// </summary>
-    /// <param name="dispatcher">The WPF dispatcher.</param>
-    public WpfLogUiDispatcher(Dispatcher dispatcher)
-    {
-        _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
-    }
+        /// <summary>
+        /// Gets the underlying WPF <see cref="Dispatcher"/>.
+        /// </summary>
+        public Dispatcher Dispatcher => _dispatcher;
 
-    /// <summary>
-    /// Executes the specified action on the UI thread.
-    /// </summary>
-    /// <param name="action">The action to execute.</param>
-    public void Invoke(Action action)
-    {
-        if (action is null)
+        /// <summary>
+        /// Initializes a new instance of the <see cref="WpfLogUiDispatcher"/> class
+        /// using the current application or thread dispatcher.
+        /// </summary>
+        public WpfLogUiDispatcher()
+            : this(Application.Current?.Dispatcher ?? Dispatcher.CurrentDispatcher)
         {
-            throw new ArgumentNullException(nameof(action));
         }
 
-        if (_dispatcher.CheckAccess())
+        /// <summary>
+        /// Initializes a new instance of the <see cref="WpfLogUiDispatcher"/> class.
+        /// </summary>
+        /// <param name="dispatcher">The WPF dispatcher.</param>
+        public WpfLogUiDispatcher(Dispatcher dispatcher)
         {
-            action();
-            return;
+            _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         }
 
-        _dispatcher.Invoke(action);
-    }
-
-    /// <summary>
-    /// Executes the specified action asynchronously on the UI thread.
-    /// </summary>
-    /// <param name="action">The action to execute.</param>
-    public void BeginInvoke(Action action)
-    {
-        if (action is null)
+        /// <summary>
+        /// Executes the specified action on the UI thread.
+        /// </summary>
+        /// <param name="action">The action to execute.</param>
+        public void Invoke(Action action)
         {
-            throw new ArgumentNullException(nameof(action));
+            ArgumentNullException.ThrowIfNull(action);
+
+            if (_dispatcher.CheckAccess())
+            {
+                action();
+                return;
+            }
+
+            _dispatcher.Invoke(action);
         }
 
-        if (_dispatcher.CheckAccess())
+        /// <summary>
+        /// Executes the specified action asynchronously on the UI thread at
+        /// <see cref="DispatcherPriority.Background"/> priority.
+        /// </summary>
+        /// <param name="action">The action to execute.</param>
+        public void BeginInvoke(Action action)
         {
-            action();
-            return;
-        }
+            ArgumentNullException.ThrowIfNull(action);
 
-        _dispatcher.BeginInvoke(action);
+            if (_dispatcher.CheckAccess())
+            {
+                action();
+                return;
+            }
+
+            _dispatcher.BeginInvoke(action, DispatcherPriority.Background);
+        }
     }
 }
